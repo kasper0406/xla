@@ -7996,6 +7996,7 @@ absl::StatusOr<std::unique_ptr<dnn::DnnGraph>> CudnnSupport::DeserializeGraph(
 
 absl::Status CudnnGraph::Prepare(dnn::DnnSupport& dnn_support,
                                  const NumericOptions& numeric_options) {
+  VLOG(2) << "CudnnGraph::Prepare";
   const CudnnSupport& cudnn_support = static_cast<CudnnSupport&>(dnn_support);
   TF_ASSIGN_OR_RETURN(auto cudnn, cudnn_support.cudnn_->GetLocalHandle());
   RETURN_IF_CUDNN_FRONTEND_ERROR(graph_.validate());

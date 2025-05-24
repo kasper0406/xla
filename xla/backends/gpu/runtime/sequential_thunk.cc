@@ -70,6 +70,7 @@ std::string SequentialThunk::ToString(int indent) const {
 absl::Status SequentialThunk::Prepare(
     const PrepareParams& params, ResourceRequestsInterface& resource_requests) {
   for (auto& thunk : thunks_) {
+    VLOG(2) << "Preparing SequentialThunk: " << thunk->ToString(2);
     TF_RETURN_IF_ERROR(thunk->Prepare(params, resource_requests));
   }
   return absl::OkStatus();

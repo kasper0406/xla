@@ -483,22 +483,34 @@ absl::StatusOr<std::vector<GlobalDeviceId>> GetParticipatingDevices(
     GlobalDeviceId device_id, const DeviceAssignment& device_assignment,
     absl::Span<const ReplicaGroup> replica_groups,
     CollectiveOpGroupMode group_mode) {
+  VLOG(2) << "Inside GetParticipatingDevices";
+  VLOG(2) << "Device assignment addr: " << &device_assignment;
   int replica_count = device_assignment.replica_count();
   int partition_count = device_assignment.computation_count();
 
+  VLOG(2) << "Inside GetParticipatingDevices - before logical_id";
   TF_ASSIGN_OR_RETURN(const DeviceAssignment::LogicalID logical_id,
                       device_assignment.LogicalIdForDevice(device_id));
   int current_replica_id = logical_id.replica_id;
   int current_partition_id = logical_id.computation_id;
+  VLOG(2) << "Inside GetParticipatingDevices - after logical_id, current_replica_id: "
+          << current_replica_id << ", current_partition_id: "
+          << current_partition_id << ", replica_count: "
+          << replica_count << ", partition_count: " << partition_count;
   TF_RET_CHECK(0 <= current_replica_id && current_replica_id < replica_count)
       << current_replica_id << " " << replica_count;
   TF_RET_CHECK(0 <= current_partition_id &&
                current_partition_id < partition_count)
       << current_partition_id << " " << partition_count;
+  
+  VLOG(2) << "Inside GetParticipatingDevices, current_replica_id: "
+          << current_replica_id << ", current_partition_id: "
+          << current_partition_id;
 
   std::vector<GlobalDeviceId> participants;
   switch (group_mode) {
     case CollectiveOpGroupMode::kCrossReplica: {
+      VLOG(2) << "Inside GetParticipatingDevices - group_mode - kCrossReplica";
       // This is a cross replica operation. replica group contains replica id.
       // use current replica id to find the set of participating replicas. If
       // replica groups are empty, assume a group with all replicas.
@@ -519,6 +531,7 @@ absl::StatusOr<std::vector<GlobalDeviceId>> GetParticipatingDevices(
     }
 
     case CollectiveOpGroupMode::kCrossPartition: {
+      VLOG(2) << "Inside GetParticipatingDevices - group_mode - kCrossPartition";
       // replica_groups contain partition_id, group contains all partitions for
       // the current replica.
       TF_ASSIGN_OR_RETURN(std::vector<int> participating_partitions,
@@ -535,6 +548,7 @@ absl::StatusOr<std::vector<GlobalDeviceId>> GetParticipatingDevices(
     }
 
     case CollectiveOpGroupMode::kCrossReplicaAndPartition: {
+      VLOG(2) << "Inside GetParticipatingDevices - group_mode - kCrossReplicaAndPartition";
       // replica_groups contain replica_ids. Group contains replicas for all
       // partitions.
       TF_ASSIGN_OR_RETURN(std::vector<int> participating_replicas,
@@ -554,6 +568,7 @@ absl::StatusOr<std::vector<GlobalDeviceId>> GetParticipatingDevices(
     }
 
     case CollectiveOpGroupMode::kFlattenedID: {
+      VLOG(2) << "Inside GetParticipatingDevices - group_mode - kFlattenedID";
       // replica groups contain flattened-ids and cannot be empty.
       TF_RET_CHECK(!replica_groups.empty())
           << "replica groups cannot be empty for kFlattenedID mode";

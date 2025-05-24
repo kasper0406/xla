@@ -70,7 +70,8 @@ DebugOptions DefaultDebugOptionsIgnoringFlags() {
   opts.set_xla_gpu_autotune_level(4);
   opts.set_xla_gpu_autotune_max_solutions(0);
   opts.set_xla_cpu_multi_thread_eigen(true);
-  opts.set_xla_gpu_cuda_data_dir("./cuda_sdk_lib");
+  // opts.set_xla_gpu_cuda_data_dir("./cuda_sdk_lib");
+  opts.set_xla_gpu_cuda_data_dir("/xla/cuda_sdk_lib");
   opts.set_xla_gpu_generate_debug_info(false);
   opts.set_xla_gpu_generate_line_info(false);
 

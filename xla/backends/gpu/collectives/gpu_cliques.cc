@@ -563,6 +563,8 @@ absl::StatusOr<std::shared_ptr<LockableGpuClique::Lock>> AcquireGpuClique(
           },
           WarnStuckTimeout(), TerminateTimeout()));
 
+  VLOG(2) << "After obtaining clique lock";
+
   // If lock is not null return it to the caller.
   if (*clique) return clique;
 
@@ -581,6 +583,7 @@ absl::StatusOr<std::shared_ptr<LockableGpuClique::Lock>> AcquireGpuClique(
   config.async_execution = false;
 
   if (enable_nccl_comm_splitting) {
+    VLOG(2) << "Trying to split an acquired clique";
     for (auto& [acquired_clique_key, acquired_clique] : acquired_cliques) {
       if (clique_key.IsSubsetOf(acquired_clique_key)) {
         return InitializeGpuClique(collectives, device, run_id, clique_key,
@@ -589,6 +592,8 @@ absl::StatusOr<std::shared_ptr<LockableGpuClique::Lock>> AcquireGpuClique(
       }
     }
   }
+
+  VLOG(2) << "No cliques to split, creating a new one";
 
   // If we can't split any of the acquired cliques, create a new one.
   return InitializeGpuClique(collectives, device, run_id, clique_key,

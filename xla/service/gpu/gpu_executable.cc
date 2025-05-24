@@ -199,6 +199,7 @@ absl::Status ExecuteThunksImpl(
     const ServiceExecutableRunOptions* run_options,
     const BufferAllocations& buffer_allocations, bool block_host_until_done,
     const absl::flat_hash_set<ExecutionStreamId>& execution_stream_ids) {
+  VLOG(2) << "Inside ExecuteThunksImpl";
   bool mock_collectives =
       run_options->run_options().gpu_executable_run_options()
           ? run_options->run_options()
@@ -252,6 +253,8 @@ absl::Status ExecuteThunksImpl(
     command_buffer_trace_stream = borrowed_command_buffer_trace_stream.get();
   }
 
+  VLOG(2) << "After borrowing streams";
+
   // Borrow stream for additional compute streams
   Thunk::ExecutionStreamIdMap additional_execution_streams;
   std::vector<StreamPool::Ptr> additional_streams;
@@ -279,6 +282,8 @@ absl::Status ExecuteThunksImpl(
     TF_ASSIGN_OR_RETURN(execution_timer, main_stream->CreateEventBasedTimer(
                                              profile->warmup_run_executed()));
   }
+  
+  VLOG(2) << "After creating event timer";
 
   // Parameters for executing collective operations.
   TF_ASSIGN_OR_RETURN(Thunk::CollectiveExecuteParams collective_params,
@@ -286,6 +291,8 @@ absl::Status ExecuteThunksImpl(
                           *run_options, async_comms_streams,
                           main_stream->parent()->device_ordinal(),
                           collective_max_nchannels, p2p_max_nchannels));
+
+  VLOG(2) << "After creating collective params";
 
   ResourceRequests resource_requests;
 
@@ -296,6 +303,8 @@ absl::Status ExecuteThunksImpl(
     TF_RETURN_IF_ERROR(
         thunk_sequence.Prepare(prepare_params, resource_requests));
   }
+
+  VLOG(2) << "After preparing thunks";
 
   // Acquire collective cliques requested by thunks.
   Thunk::CollectiveCliques collective_cliques;
@@ -308,6 +317,8 @@ absl::Status ExecuteThunksImpl(
                 ? debug_options->xla_gpu_collectives_use_persistent_cliques()
                 : false));
   }
+
+  VLOG(2) << "After acquiring collective cliques";
 
   {  // Initialize thunks using prepared resources before execution.
     Thunk::InitializeParams initialize_params{
@@ -326,6 +337,8 @@ absl::Status ExecuteThunksImpl(
     TF_RETURN_IF_ERROR(thunk_sequence.Initialize(initialize_params));
   }
 
+  VLOG(2) << "After initializing thunks";
+
   // Maybe join a round of rendezvous after thunk initialization. We do this
   // only in presence of newly acquired collective cliques which means that we
   // have collective operations and clique initialization is famous for
@@ -335,6 +348,8 @@ absl::Status ExecuteThunksImpl(
     TF_RETURN_IF_ERROR(
         RendezvousAfterInitialization(run_options, debug_options));
   }
+
+  VLOG(2) << "After rendezvous";
 
   // Prepare parameters for thunks execution.
   Thunk::ExecuteParams execute_params = Thunk::ExecuteParams::Create(
@@ -379,6 +394,7 @@ absl::Status RendezvousAfterInitialization(
   // setup we synchronize after first initialization to make sure that all
   // replicas completed initialization process before we start execution.
   auto* gpu_opts = run_options->run_options().gpu_executable_run_options();
+  VLOG(2) << "Setting device assignment in gpu_executable";
   auto* device_assn = run_options->run_options().device_assignment();
 
   // If we don't have Gpu executable options or device assignment it means we
@@ -482,6 +498,8 @@ GpuExecutable::ResolveConstantGlobals(se::Stream* stream) {
     module_spec.AddCudaCubinInMemory(binary());
   }
   module_spec.AddCudaPtxInMemory(text().c_str());
+  
+  VLOG(2) << "After add cuda ptx in memory";
 
   auto globals = std::make_unique<BufferAllocToDeviceMemoryMap>();
   se::ModuleHandle module_handle;
@@ -497,6 +515,8 @@ GpuExecutable::ResolveConstantGlobals(se::Stream* stream) {
   // A flag signalling if constant initialization submitted memcpy operations
   // to the `stream`.
   int submitted_mem_copies = 0;
+
+  VLOG(2) << "Before looping over constants";
 
   for (const ConstantInfo& info : constants_) {
     absl::StatusOr<stream_executor::DeviceMemoryBase> global_status;
@@ -637,9 +657,11 @@ absl::StatusOr<BufferAllocations> GpuExecutable::GenerateBufferAllocations(
 
   absl::Span<const BufferAllocation> allocations = GetAllocations();
   const int64_t num_buffers = allocations.size();
+  VLOG(2) << "Allocating " << num_buffers << " buffers";
   std::vector<se::DeviceMemoryBase> buffers;
   buffers.reserve(num_buffers);
   for (int64_t i = 0; i < num_buffers; ++i) {
+    VLOG(2) << "Allocating buffer " << i;
     const BufferAllocation& allocation = allocations[i];
     TF_ASSIGN_OR_RETURN(
         buffers.emplace_back(),
@@ -672,6 +694,8 @@ absl::StatusOr<ExecutionOutput> GpuExecutable::ExecuteAsyncOnStreamImpl(
   se::DeviceMemoryAllocator* const memory_allocator = run_options->allocator();
   se::StreamExecutor* executor = run_options->stream()->parent();
 
+  VLOG(2) << "Executing GpuExecutable::ExecuteAsyncOnStreamImpl";
+
   // GpuExecutable always bound to a single GpuContext during its execution, so
   // we activate it once to skip expensive context activations later.
   auto activation = executor->Activate();
@@ -682,12 +706,16 @@ absl::StatusOr<ExecutionOutput> GpuExecutable::ExecuteAsyncOnStreamImpl(
   // "recursive" invocations, which are done when holding a lock already.
   std::variant<absl::ReaderMutexLock, absl::WriterMutexLock> gpu_lock(
       std::in_place_index_t<0>{}, &GetGpuMutex(executor));
+  
+  VLOG(2) << "Executing GpuExecutable::ExecuteAsyncOnStreamImpl after lock";
 
   // Maybe update to a writer lock to get exclusive access to underlying GPU.
   if (auto* gpu_opts = run_options->run_options().gpu_executable_run_options();
       gpu_opts && gpu_opts->requires_exclusive_lock_on_gpu()) {
     gpu_lock.emplace<1>(&GetGpuMutex(executor));
   }
+  
+  VLOG(2) << "Executing GpuExecutable::ExecuteAsyncOnStreamImpl after emplce lock";
 
   const GpuExecutable::BufferAllocToDeviceMemoryMap* globals;
   {
@@ -697,6 +725,8 @@ absl::StatusOr<ExecutionOutput> GpuExecutable::ExecuteAsyncOnStreamImpl(
 
     TF_ASSIGN_OR_RETURN(globals, ResolveConstantGlobals(run_options->stream()));
   }
+  
+  VLOG(2) << "Executing GpuExecutable::ExecuteAsyncOnStreamImpl after resolve constant globals";
 
   // Use the `device_ordinal` from the `run_options` if it is provided. This is
   // the ordinal of the logical devices (e.g., virtual GPUs). If it is not
@@ -706,6 +736,8 @@ absl::StatusOr<ExecutionOutput> GpuExecutable::ExecuteAsyncOnStreamImpl(
                                  : executor->device_ordinal();
   ExecutionOutput result(/*on_device_shape=*/output_shape_, memory_allocator,
                          device_ordinal, executor->device_ordinal());
+  
+  VLOG(2) << "Executing GpuExecutable::ExecuteAsyncOnStreamImpl before buffer allocations";
 
   TF_ASSIGN_OR_RETURN(
       BufferAllocations buffer_allocations,

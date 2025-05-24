@@ -237,12 +237,17 @@ absl::StatusOr<GpuCliqueKey> GetGpuCliqueKey(
     const std::vector<ReplicaGroup>& replica_groups,
     CollectiveOpGroupMode group_mode, AsyncStreamKind stream_kind,
     bool use_nccl) {
+  TF_RET_CHECK(params.device_assn) << "Device assignment is null";
+
+  VLOG(2) << "Inside GetGpuCliqueKey";
   GlobalDeviceId global_device_id = params.global_device_id;
 
   TF_ASSIGN_OR_RETURN(
       std::vector<GlobalDeviceId> participants,
       GetParticipatingDevices(global_device_id, *params.device_assn,
                               replica_groups, group_mode));
+  VLOG(2) << "After GetParticipatingDevices, participants: participants.size()="
+          << participants.size();
   std::vector<std::vector<GlobalDeviceId>> participant_groups;
   if (use_nccl) {
     // If splitting is enabled, participating groups must match in order for a
@@ -251,6 +256,7 @@ absl::StatusOr<GpuCliqueKey> GetGpuCliqueKey(
     static const int64_t enable_nccl_comm_splitting =
         xla::GetDebugOptionsFromFlags().xla_gpu_enable_nccl_comm_splitting();
     if (enable_nccl_comm_splitting) {
+      VLOG(2) << "GetGpuCliqueKey: with nccl comm splitting";
       TF_ASSIGN_OR_RETURN(participant_groups,
                           GetParticipatingDevicesGroups(
                               *params.device_assn, replica_groups, group_mode));
@@ -263,8 +269,11 @@ absl::StatusOr<GpuCliqueKey> GetGpuCliqueKey(
           "environment configuration.");
     }
   }
+  VLOG(2) << "GetGpuCliqueKey: Got participants";
   TF_ASSIGN_OR_RETURN(int64_t num_local_participants,
                       GetNumLocalParticipants(params, participants));
+
+  VLOG(2) << "GetGpuCliqueKey: num_local_participants: " << num_local_participants;
 
   return GpuCliqueKey(std::move(participants), num_local_participants,
                       kNoStreamId, stream_kind, std::move(participant_groups));
@@ -399,12 +408,15 @@ absl::StatusOr<se::Event*> CollectiveThunk::AsyncEvents::GetEvent(
 
 absl::Status CollectiveThunk::Prepare(
     const PrepareParams& params, ResourceRequestsInterface& resource_requests) {
+  VLOG(2) << "Inside CollectiveThunk::Prepare()";
   TF_ASSIGN_OR_RETURN(GpuCollectives * collectives, GetGpuCollectives(params));
+  VLOG(2) << "Inside CollectiveThunk::Prepare() after GetGpuCollectives()";
   TF_ASSIGN_OR_RETURN(
       GpuCliqueKey clique_key,
       GetGpuCliqueKey(collectives, *params.collective_params,
                       config().replica_groups, config().group_mode,
                       GetAsyncStreamKind()));
+  VLOG(2) << "Inside CollectiveThunk::Prepare() after GetGpuCliqueKey()";
   return resource_requests.AddClique(clique_key);
 }
 

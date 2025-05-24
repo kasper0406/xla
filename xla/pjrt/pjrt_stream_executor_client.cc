@@ -2858,14 +2858,17 @@ PjRtStreamExecutorLoadedExecutable::ExecuteHelper(
     const RunId& run_id, const ExecuteOptions& options, bool fill_future,
     PjRtDevice* device) const {
   const uint64_t start_time_usecs = tsl::Env::Default()->NowMicros();
+  VLOG(2) << "Setting device assignment";
   std::shared_ptr<DeviceAssignment> device_assignment;
   if (device == nullptr) {
+    VLOG(2) << "Setting device assignment when device is nullptr";
     CHECK(device_assignment_ != nullptr);
     const int64_t device_id = (*device_assignment_)(replica, partition);
     PjRtGlobalDeviceId global_device_id(device_id);
     TF_ASSIGN_OR_RETURN(device, client_->LookupDevice(global_device_id));
     device_assignment = device_assignment_;
   } else {
+    VLOG(2) << "Setting device assignment when device is not nullptr";
     CHECK(device_assignment_ == nullptr);
     CHECK_EQ(replica, 0);
     CHECK_EQ(partition, 0);

@@ -98,7 +98,7 @@ struct HloRunnerConfig {
   int32_t while_execution_count = -1;
   bool remove_infeed_outfeed = true;
   bool compile_as_stablehlo = false;
-  bool use_layouts_from_hlo_module = false;
+  bool use_layouts_from_hlo_module = true; // false;
   bool force_auto_layout = false;
   int32_t num_repeats = 1;
   std::string execution_options_path = "";

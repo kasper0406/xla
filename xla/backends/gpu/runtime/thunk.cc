@@ -117,6 +117,7 @@ Thunk::CollectiveExecuteParams::Create(
     const ServiceExecutableRunOptions& run_options,
     absl::Span<se::Stream* const> async_streams, int64_t local_device_ordinal,
     int64_t collective_max_nchannels, int64_t p2p_max_nchannels) {
+  VLOG(2) << "CollectiveExecuteParams::Create";
   const GpuExecutableRunOptions* gpu_options =
       run_options.run_options().gpu_executable_run_options();
 

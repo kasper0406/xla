@@ -9,3 +9,6 @@ import %workspace%/tensorflow.bazelrc
 import %workspace%/warnings.bazelrc
 
 try-import %workspace%/xla_configure.bazelrc
+
+build:cuda --@local_config_cuda//cuda:include_cuda_libs=true
+

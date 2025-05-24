@@ -257,6 +257,7 @@ void UpdateEntryComputationLayout(
     ShapeUtil::ForEachMutableSubshape(
         shape, [&shape_representation_fn, empty_tiles_only](
                    Shape* subshape, const ShapeIndex& index) {
+          VLOG(2) << "Considering to update shape";
           if (subshape->IsArray() && subshape->has_layout()) {
             if (!empty_tiles_only ||
                 (empty_tiles_only && subshape->layout().tiles().empty())) {

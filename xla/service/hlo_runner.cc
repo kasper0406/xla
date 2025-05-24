@@ -118,7 +118,8 @@ se::DeviceMemoryAllocator* HloRunner::GetAllocator() {
 absl::StatusOr<ScopedShapedBuffer> HloRunner::TransferLiteralToDevice(
     const Literal& literal,
     const ComputationLayout* absl_nullable entry_computation_layout,
-    int64_t param_no) {
+    int64_t param_no,
+    int64_t device_ordinal) {
   auto shape_representation_fn = [this, entry_computation_layout,
                                   param_no](const Shape& shape) {
     Shape new_shape = device_shape_representation_fn_(shape);
@@ -146,43 +147,58 @@ absl::StatusOr<ScopedShapedBuffer> HloRunner::TransferLiteralToDevice(
     return new_shape;
   };
 
+  VLOG(2) << "Before getting raw stream for device ordinal: " << device_ordinal;
+  TF_ASSIGN_OR_RETURN(
+    auto raw_stream,
+    backend().stream_executor(device_ordinal));
+  // se::DeviceMemoryAllocator* memory_allocator = (se::DeviceMemoryAllocator*)raw_stream;
+
+  VLOG(2) << "Before allocating for device ordinal: " << device_ordinal;
   TF_ASSIGN_OR_RETURN(
       ScopedShapedBuffer buffer,
       backend().transfer_manager()->AllocateScopedShapedBuffer(
           literal.shape(), backend().memory_allocator(),
-          backend().default_device_ordinal(), shape_representation_fn));
+          device_ordinal, shape_representation_fn));
+  VLOG(2) << "After allocating for device ordinal: " << device_ordinal;
   TF_ASSIGN_OR_RETURN(
-      auto stream, backend().BorrowStream(backend().default_stream_executor()));
+      auto stream, backend().BorrowStream(raw_stream));
+  VLOG(2) << "After borrowing stream for device ordinal: " << device_ordinal;
   TF_RETURN_IF_ERROR(backend().transfer_manager()->TransferLiteralToDevice(
       stream.get(), literal, buffer));
   return std::move(buffer);
 }
 
-absl::StatusOr<std::vector<ScopedShapedBuffer>>
-HloRunner::TransferLiteralsToDevice(
+absl::StatusOr<std::vector<std::vector<ScopedShapedBuffer>>>
+HloRunner::TransferLiteralsToDevices(
     absl::Span<const Literal* const> literals,
     const ComputationLayout* absl_nullable entry_computation_layout) {
-  std::vector<ScopedShapedBuffer> buffers;
-  buffers.reserve(literals.size());
-  for (auto i = 0; i < literals.size(); i++) {
-    const Literal* literal = literals[i];
-    CHECK(literal != nullptr);
-    TF_ASSIGN_OR_RETURN(
-        ScopedShapedBuffer buffer,
-        TransferLiteralToDevice(*literal, entry_computation_layout, i));
-    buffers.push_back(std::move(buffer));
+  std::vector<std::vector<ScopedShapedBuffer>> all_buffers;
+  for (uint64_t device_ordinal = 0; device_ordinal < backend().device_count(); ++device_ordinal) {
+    VLOG(2) << "Transferring literals to device ordinal: "
+            << device_ordinal;
+    std::vector<ScopedShapedBuffer> buffers;
+    buffers.reserve(literals.size());
+    for (auto i = 0; i < literals.size(); i++) {
+      const Literal* literal = literals[i];
+      CHECK(literal != nullptr);
+      TF_ASSIGN_OR_RETURN(
+          ScopedShapedBuffer buffer,
+          TransferLiteralToDevice(*literal, entry_computation_layout, i, device_ordinal));
+      buffers.push_back(std::move(buffer));
+    }
+    all_buffers.push_back(std::move(buffers));
   }
-  return std::move(buffers);
+  return std::move(all_buffers);
 }
 
-absl::StatusOr<std::vector<ScopedShapedBuffer>>
-HloRunner::TransferLiteralsToDevice(absl::Span<const Literal> literals) {
+absl::StatusOr<std::vector<std::vector<ScopedShapedBuffer>>>
+HloRunner::TransferLiteralsToDevices(absl::Span<const Literal> literals) {
   std::vector<const Literal*> literal_pointers;
   literal_pointers.reserve(literals.size());
   for (const auto& literal : literals) {
     literal_pointers.push_back(&literal);
   }
-  return TransferLiteralsToDevice(literal_pointers, nullptr);
+  return TransferLiteralsToDevices(literal_pointers, nullptr);
 }
 
 absl::StatusOr<Literal> HloRunner::TransferLiteralFromDevice(
@@ -216,8 +232,8 @@ absl::StatusOr<Literal> HloRunner::Execute(
     ExecutionProfile* profile) {
   MaybeUpdateEntryComputationLayout(module.get());
   TF_ASSIGN_OR_RETURN(
-      std::vector<ScopedShapedBuffer> argument_buffers,
-      TransferLiteralsToDevice(arguments, &module->entry_computation_layout()));
+      std::vector<std::vector<ScopedShapedBuffer>> argument_buffers,
+      TransferLiteralsToDevices(arguments, &module->entry_computation_layout()));
   TF_ASSIGN_OR_RETURN(ExecutionOutput result,
                       ExecuteWithMovedDeviceBuffersAndBufferAssignment(
                           /*module=*/std::move(module),
@@ -235,8 +251,8 @@ absl::StatusOr<Literal> HloRunner::ExecuteWithBufferAssignment(
     ExecutionProfile* profile) {
   MaybeUpdateEntryComputationLayout(module.get());
   TF_ASSIGN_OR_RETURN(
-      std::vector<ScopedShapedBuffer> argument_buffers,
-      TransferLiteralsToDevice(arguments, &module->entry_computation_layout()));
+      std::vector<std::vector<ScopedShapedBuffer>> argument_buffers,
+      TransferLiteralsToDevices(arguments, &module->entry_computation_layout()));
   TF_ASSIGN_OR_RETURN(ExecutionOutput result,
                       ExecuteWithMovedDeviceBuffersAndBufferAssignment(
                           /*module=*/std::move(module), buffer_assignment_proto,
@@ -252,14 +268,14 @@ absl::StatusOr<Literal> HloRunner::ExecuteWithExecutable(
   TF_ASSIGN_OR_RETURN(HloRunnerExecutable* const hlo_runner_executable,
                       HloRunnerExecutable::TryUnwrap(*this, executable));
   TF_ASSIGN_OR_RETURN(
-      std::vector<ScopedShapedBuffer> argument_buffers,
-      TransferLiteralsToDevice(arguments, &hlo_runner_executable->executable()
+      std::vector<std::vector<ScopedShapedBuffer>> argument_buffers,
+      TransferLiteralsToDevices(arguments, &hlo_runner_executable->executable()
                                                ->module()
                                                .entry_computation_layout()));
   TF_ASSIGN_OR_RETURN(ExecutionOutput result,
                       ExecuteWithDeviceBuffers(
                           /*executable=*/hlo_runner_executable,
-                          /*arguments=*/argument_buffers,
+                          /*arguments=*/std::move(argument_buffers),
                           /*profile=*/profile));
   return TransferLiteralFromDevice(result.Result());
 }
@@ -316,6 +332,10 @@ static void ExecutionInputsFromMovedScopedShapedBuffers(
 
     ShapeTree<MaybeOwningDeviceMemory> buffer_tree(
         input_buffer.on_device_shape());
+    
+    VLOG(2) << "On host shape: " << input_buffer.on_host_shape().ToString();
+    VLOG(2) << "On device shape: " << input_buffer.on_device_shape().ToString();
+    VLOG(2) << "Num buffer leafs: " << input_buffer.buffers().leaf_count();
 
     input_buffer.buffers().ForEachElement(
         [&](const ShapeIndex& index,
@@ -348,35 +368,46 @@ static void ExecutionInputsFromMovedScopedShapedBuffers(
 
 absl::StatusOr<ExecutionOutput> HloRunner::ExecuteWithDeviceBuffers(
     std::unique_ptr<HloModule> module,
-    absl::Span<ScopedShapedBuffer const> arguments, bool run_hlo_passes,
+    std::vector<std::vector<ScopedShapedBuffer>> arguments, bool run_hlo_passes,
     ExecutionProfile* profile) {
   TF_ASSIGN_OR_RETURN(std::unique_ptr<OpaqueExecutable> executable,
                       CreateExecutable(std::move(module), run_hlo_passes));
   TF_ASSIGN_OR_RETURN(HloRunnerExecutable* const hlo_runner_executable,
                       HloRunnerExecutable::TryUnwrap(*this, executable.get()));
-  return ExecuteWithDeviceBuffers(hlo_runner_executable, arguments, profile);
+  return ExecuteWithDeviceBuffers(hlo_runner_executable, std::move(arguments), profile);
 }
 
 absl::StatusOr<ExecutionOutput> HloRunner::ExecuteWithDeviceBuffers(
     OpaqueExecutable* executable,
-    absl::Span<ScopedShapedBuffer const> arguments, ExecutionProfile* profile) {
+    std::vector<std::vector<ScopedShapedBuffer>> all_arguments, ExecutionProfile* profile) {
   TF_ASSIGN_OR_RETURN(HloRunnerExecutable* const hlo_runner_executable,
                       HloRunnerExecutable::TryUnwrap(*this, executable));
-  std::vector<ExecutionInput> execution_arguments =
-      ExecutionInputsFromScopedShapedBuffers(
-          arguments,
-          hlo_runner_executable->executable()
-              ->module()
-              .input_output_alias_config(),
-          backend().default_stream_executor()->device_ordinal(),
-          GetAllocator());
+  
+  std::vector<std::vector<ExecutionInput>> all_execution_arguments;
+  for (int64_t device_ordinal = 0;
+       device_ordinal < backend().device_count(); ++device_ordinal) {
+    TF_ASSIGN_OR_RETURN(
+      auto raw_stream,
+      backend().stream_executor(device_ordinal));
+    se::DeviceMemoryAllocator* memory_allocator = (se::DeviceMemoryAllocator*)raw_stream;
+
+    std::vector<ExecutionInput> execution_arguments = ExecutionInputsFromScopedShapedBuffers(
+        all_arguments[device_ordinal],
+        hlo_runner_executable->executable()
+            ->module()
+            .input_output_alias_config(),
+        device_ordinal,
+        memory_allocator);
+    all_execution_arguments.push_back(std::move(execution_arguments));
+  }
+  
   return ExecuteWithExecutionInputs(hlo_runner_executable->executable(),
-                                    std::move(execution_arguments), profile);
+                                    std::move(all_execution_arguments), profile);
 }
 
 absl::StatusOr<ExecutionOutput> HloRunner::ExecuteWithMovedDeviceBuffers(
     std::unique_ptr<HloModule> module,
-    std::vector<ScopedShapedBuffer> arguments, bool run_hlo_passes,
+    std::vector<std::vector<ScopedShapedBuffer>> arguments, bool run_hlo_passes,
     ExecutionProfile* profile) {
   return ExecuteWithMovedDeviceBuffersAndBufferAssignment(
       std::move(module), /*buffer_assignment_proto=*/nullptr,
@@ -387,7 +418,7 @@ absl::StatusOr<ExecutionOutput>
 HloRunner::ExecuteWithMovedDeviceBuffersAndBufferAssignment(
     std::unique_ptr<HloModule> module,
     const BufferAssignmentProto* buffer_assignment_proto,
-    std::vector<ScopedShapedBuffer> arguments, bool run_hlo_passes,
+    std::vector<std::vector<ScopedShapedBuffer>> arguments, bool run_hlo_passes,
     ExecutionProfile* profile) {
   TF_ASSIGN_OR_RETURN(
       std::unique_ptr<OpaqueExecutable> executable,
@@ -400,21 +431,36 @@ HloRunner::ExecuteWithMovedDeviceBuffersAndBufferAssignment(
 }
 
 absl::StatusOr<ExecutionOutput> HloRunner::ExecuteWithMovedDeviceBuffers(
-    Executable* executable, std::vector<ScopedShapedBuffer> arguments,
+    Executable* executable, std::vector<std::vector<ScopedShapedBuffer>> all_arguments,
     ExecutionProfile* profile) {
-  std::vector<ExecutionInput> execution_arguments;
+  std::vector<std::vector<ExecutionInput>> all_execution_arguments;
   // We need this to keep the arguments not owned by execution_arguments
   // alive.
-  std::vector<se::OwningDeviceMemory> owned_arguments;
+  std::vector<std::vector<se::OwningDeviceMemory>> all_owned_arguments;
 
-  ExecutionInputsFromMovedScopedShapedBuffers(
-      &execution_arguments, &owned_arguments, std::move(arguments),
-      executable->module().input_output_alias_config(),
-      backend().default_stream_executor()->device_ordinal(), GetAllocator());
+  for (int64_t device = 0; device < all_arguments.size(); ++device) {
+    std::vector<ExecutionInput> execution_arguments;
+    // We need this to keep the arguments not owned by execution_arguments
+    // alive.
+    std::vector<se::OwningDeviceMemory> owned_arguments;
+
+    TF_ASSIGN_OR_RETURN(
+      auto stream_executor,
+      backend().stream_executor(device));
+    se::DeviceMemoryAllocator* allocator = (se::DeviceMemoryAllocator*)stream_executor;
+
+    ExecutionInputsFromMovedScopedShapedBuffers(
+        &execution_arguments, &owned_arguments, std::move(all_arguments[device]),
+        executable->module().input_output_alias_config(),
+        device, allocator);
+    
+    all_execution_arguments.push_back(std::move(execution_arguments));
+    all_owned_arguments.push_back(std::move(owned_arguments));
+  }
 
   TF_ASSIGN_OR_RETURN(ExecutionOutput retval,
                       ExecuteWithExecutionInputs(
-                          executable, std::move(execution_arguments), profile));
+                          executable, std::move(all_execution_arguments), profile));
 
   // This is here to make sure that the output buffers get freed up when the
   // ExecutionOutput is destroyed.
@@ -423,33 +469,127 @@ absl::StatusOr<ExecutionOutput> HloRunner::ExecuteWithMovedDeviceBuffers(
 }
 
 absl::StatusOr<ExecutionOutput> HloRunner::ExecuteWithExecutionInputs(
-    Executable* executable, std::vector<ExecutionInput> arguments,
+    Executable* executable, std::vector<std::vector<ExecutionInput>> arguments,
     ExecutionProfile* profile) {
   MaybeUpdateEntryComputationLayout(&executable->module());
 
-  // Get service run options.
-  TF_ASSIGN_OR_RETURN(auto stream,
-                      backend().default_stream_executor()->CreateStream());
-  ServiceExecutableRunOptions service_run_options =
-      GetServiceRunOptionsForDevice(backend().default_device_ordinal(),
-                                    stream.get(), nullptr, RunId(),
-                                    backend().device_count());
-  service_run_options.mutable_run_options()->set_execution_profile(profile);
+  VLOG(2) << "Running with nullptr device assignment";
+  VLOG(2) << "Module config num_replicas: "
+          << executable->module_config().replica_count();
+  VLOG(2) << "Module config num_partitions: "
+          << executable->module_config().num_partitions();
+  TF_ASSIGN_OR_RETURN(auto device_assignment, backend().computation_placer()->AssignDevices(
+    executable->module_config().replica_count(),
+    executable->module_config().num_partitions()));
+  VLOG(2) << "Arguments size: " << arguments.size();
 
-  auto options = executable->module().config().debug_options();
-  auto gpu_run_options = std::make_unique<gpu::GpuExecutableRunOptions>();
-  if (options.xla_gpu_require_exclusive_lock()) {
-    gpu_run_options->set_requires_exclusive_lock_on_gpu();
+
+  if (backend().device_count() > 1) {
+    std::vector<std::unique_ptr<se::Stream>> streams;
+    for (int64_t device = 0; device < backend().device_count(); ++device) {
+      TF_ASSIGN_OR_RETURN(
+          se::StreamExecutor* stream_executor,
+          backend().stream_executor(device));
+      TF_ASSIGN_OR_RETURN(auto stream,
+                          stream_executor->CreateStream());
+      streams.push_back(std::move(stream));
+    }
+
+    absl::Mutex mutex;
+    std::vector<absl::StatusOr<ExecutionOutput>> thread_results(
+            backend().device_count());
+
+    { // Scope for the thread pool.
+      std::unique_ptr<tsl::thread::ThreadPool> pool = std::make_unique<tsl::thread::ThreadPool>(
+            tsl::Env::Default(), "execution_pool",
+            /*num_threads=*/backend().device_count());
+
+      auto run_id = RunId();
+      for (int64_t device = 0; device < backend().device_count(); ++device) {
+        VLOG(2) << "Starting execution on device: " << device;
+        auto stream = streams[device].get();
+        auto device_arguments = std::move(arguments[device]);
+        auto args_ptr = std::make_unique<std::vector<xla::ExecutionInput>>(std::move(device_arguments));
+
+        auto core_task = [this, run_id, &thread_results, device, stream, &device_assignment, &profile, &executable, moved_args = std::move(args_ptr), &mutex]() mutable {
+          VLOG(2) << "Executing on device has started: " << device;
+          // Get service run options. 
+          ServiceExecutableRunOptions service_run_options =
+              GetServiceRunOptionsForDevice(device,
+                                            stream, &device_assignment, run_id,
+                                            backend().device_count());
+          service_run_options.mutable_run_options()->set_execution_profile(profile);
+
+          VLOG(2) << "Created service run options for device: " << device;
+
+          auto options = executable->module().config().debug_options();
+          auto gpu_run_options = std::make_unique<gpu::GpuExecutableRunOptions>();
+          if (options.xla_gpu_require_exclusive_lock()) {
+            gpu_run_options->set_requires_exclusive_lock_on_gpu();
+          }
+          
+          VLOG(2) << "Set GPU run options for device: " << device;
+
+          service_run_options.mutable_run_options()->set_gpu_executable_run_options(
+              gpu_run_options.get());
+
+          VLOG(2) << "Executing on device: " << device;
+
+          auto retval = executable->ExecuteOnStreamWrapper(&service_run_options, std::move(*moved_args));
+          TF_RETURN_IF_ERROR(stream->BlockHostUntilDone());
+          // TF_ASSIGN_OR_RETURN(Literal literal,
+          //                     backend().transfer_manager()->TransferLiteralFromDevice(
+          //                         streams[i].get(), results[i]));
+          // exec_results.push_back(std::move(literal));
+
+          absl::MutexLock lock(&mutex);
+          thread_results[device] = std::move(retval);
+          return absl::OkStatus();
+        };
+
+        auto shared_task_ptr = std::make_shared<decltype(core_task)>(std::move(core_task));
+        pool->Schedule([shared_task_ptr]() { 
+            (*shared_task_ptr)(); // Call the core task.
+        });
+      }
+    } // End of thread pool scope. Execution will block until all threads finish.
+
+    VLOG(2) << "Threads finished execution";
+    for (auto& thread_result : thread_results) {
+      if (!thread_result.ok()) {
+        VLOG(2) << "Thread execution failed: " << thread_result.status();
+        return thread_result.status();
+      }
+      // results.push_back(std::move(thread_result).value());
+      return std::move(thread_result).value();
+    }
+    return absl::InternalError(
+        "No results returned from thread execution, this should not happen.");
+  } else {
+    // Get service run options.
+    TF_ASSIGN_OR_RETURN(auto stream,
+                        backend().default_stream_executor()->CreateStream());
+    ServiceExecutableRunOptions service_run_options =
+        GetServiceRunOptionsForDevice(backend().default_device_ordinal(),
+                                      stream.get(), &device_assignment, RunId(),
+                                      backend().device_count());
+    service_run_options.mutable_run_options()->set_execution_profile(profile);
+
+    auto options = executable->module().config().debug_options();
+    auto gpu_run_options = std::make_unique<gpu::GpuExecutableRunOptions>();
+    if (options.xla_gpu_require_exclusive_lock()) {
+      gpu_run_options->set_requires_exclusive_lock_on_gpu();
+    }
+
+    service_run_options.mutable_run_options()->set_gpu_executable_run_options(
+        gpu_run_options.get());
+
+    TF_ASSIGN_OR_RETURN(ExecutionOutput retval,
+                        executable->ExecuteOnStreamWrapper(&service_run_options,
+                                                          std::move(arguments[0])));
+    TF_RETURN_IF_ERROR(stream->BlockHostUntilDone());
+    return std::move(retval);
   }
-
-  service_run_options.mutable_run_options()->set_gpu_executable_run_options(
-      gpu_run_options.get());
-
-  TF_ASSIGN_OR_RETURN(ExecutionOutput retval,
-                      executable->ExecuteOnStreamWrapper(&service_run_options,
-                                                         std::move(arguments)));
-  TF_RETURN_IF_ERROR(stream->BlockHostUntilDone());
-  return std::move(retval);
 }
 
 absl::StatusOr<std::vector<Literal>> HloRunner::ExecuteReplicated(
@@ -462,7 +602,7 @@ absl::StatusOr<std::vector<Literal>> HloRunner::ExecuteReplicated(
 }
 
 absl::StatusOr<std::vector<Literal>> HloRunner::ExecuteReplicatedImpl(
-    std::function<absl::StatusOr<std::vector<ScopedShapedBuffer>>(
+    std::function<absl::StatusOr<std::vector<std::vector<ScopedShapedBuffer>>>(
         const std::vector<ServiceExecutableRunOptions>&,
         const std::vector<absl::Span<const ShapedBuffer* const>>&)>
         execution_helper,
@@ -470,185 +610,17 @@ absl::StatusOr<std::vector<Literal>> HloRunner::ExecuteReplicatedImpl(
     std::function<const Literal*(int64_t, int64_t)> argument_provider,
     const ReplicatedExecuteOptions& options,
     DeviceAssignment* device_assignment) {
-  std::vector<std::unique_ptr<se::Stream>> streams;
-  std::vector<ServiceExecutableRunOptions> service_run_options;
-  int64_t num_partitions = device_assignment->computation_count();
-
-  std::vector<ScopedShapedBuffer> argument_buffers;
-  // This reserve() call is necessary for correctness, because
-  // argument_buffer_ptrs contains pointers into the elements of
-  // argument_buffers.
-  const int64_t total_argument_count = [&]() {
-    int64_t total = 0;
-    for (int64_t i = 0; i < options.num_replicas; ++i) {
-      total += argument_count_provider(i);
-    }
-    return total;
-  }();
-  argument_buffers.reserve(total_argument_count);
-
-  // Plus one so we can safely get &argument_buffer_ptrs[0] in case there are
-  // no arguments.
-  std::vector<const ShapedBuffer*> argument_buffer_ptrs(total_argument_count +
-                                                        1);
-  std::vector<absl::Span<const ShapedBuffer* const>> argument_buffer_slices;
-  int64_t index = 0;
-  RunId run_id;
-  for (int64_t i = 0; i < options.num_replicas; ++i) {
-    int64_t device =
-        (*device_assignment)(i / num_partitions, i % num_partitions);
-    TF_ASSIGN_OR_RETURN(se::StreamExecutor * executor,
-                        backend().stream_executor(device));
-    TF_ASSIGN_OR_RETURN(auto stream, executor->CreateStream());
-    streams.emplace_back(std::move(stream));
-    service_run_options.emplace_back(GetServiceRunOptionsForDevice(
-        device, streams.back().get(), device_assignment, run_id,
-        backend().device_count()));
-
-    // Copy arguments to device.
-    const int64_t argument_count = argument_count_provider(i);
-    for (int64_t arg_index = 0; arg_index < argument_count; arg_index++) {
-      const Literal* const argument = argument_provider(i, arg_index);
-      TF_RET_CHECK(argument != nullptr);
-      TF_ASSIGN_OR_RETURN(
-          ScopedShapedBuffer argument_buffer,
-          backend().transfer_manager()->AllocateScopedShapedBuffer(
-              argument->shape(), backend().memory_allocator(), device,
-              device_shape_representation_fn_));
-      TF_RETURN_IF_ERROR(backend().transfer_manager()->TransferLiteralToDevice(
-          streams.back().get(), *argument, argument_buffer));
-      argument_buffers.push_back(std::move(argument_buffer));
-      argument_buffer_ptrs[index++] = &argument_buffers.back();
-    }
-    argument_buffer_slices.emplace_back(
-        &argument_buffer_ptrs[index - argument_count], argument_count);
-  }
-
-  std::unique_ptr<tsl::thread::ThreadPool> pool;
-  TF_RET_CHECK(options.infeed_values.empty() ||
-               options.infeed_values.size() == options.num_replicas);
-  int64_t num_threads = options.infeed_values.size();
-  if (ShapeUtil::IsInitialized(options.outfeed_shape)) {
-    num_threads += options.num_replicas;
-  }
-  if (num_threads > 0) {
-    pool = std::make_unique<tsl::thread::ThreadPool>(
-        tsl::Env::Default(), "infeed_outfeed",
-        /*num_threads=*/num_threads);
-  }
-  if (!options.infeed_values.empty()) {
-    for (int64_t i = 0; i < options.num_replicas; ++i) {
-      int64_t device =
-          (*device_assignment)(i / num_partitions, i % num_partitions);
-      pool->Schedule([this, device, &options, i]() {
-        se::StreamExecutor* executor =
-            backend().stream_executor(device).value();
-        VLOG(1) << "Starting infeed on device " << device;
-        for (int64_t step = 1;
-             options.infeed_steps < 0 || step <= options.infeed_steps; ++step) {
-          TF_CHECK_OK(backend().transfer_manager()->TransferLiteralToInfeed(
-              executor, *options.infeed_values[i]));
-          if (step % 100 == 0) {
-            VLOG(1) << "Infeed step " << step;
-          }
-        }
-      });
-    }
-  }
-  if (ShapeUtil::IsInitialized(options.outfeed_shape)) {
-    if (options.outfeed_values) {
-      options.outfeed_values->resize(options.num_replicas);
-    }
-    for (int64_t i = 0; i < options.num_replicas; ++i) {
-      int64_t device =
-          (*device_assignment)(i / num_partitions, i % num_partitions);
-      pool->Schedule([this, device, &options, i]() {
-        se::StreamExecutor* executor =
-            backend().stream_executor(device).value();
-        VLOG(1) << "Starting outfeed on device " << device;
-        for (int64_t step = 1;
-             options.infeed_steps < 0 || step <= options.infeed_steps; ++step) {
-          Literal literal(options.outfeed_shape);
-          TF_CHECK_OK(backend().transfer_manager()->TransferLiteralFromOutfeed(
-              executor, &literal));
-          if (options.outfeed_values) {
-            options.outfeed_values->at(i) = std::move(literal);
-          }
-          if (step % 100 == 0) {
-            VLOG(1) << "Outfeed step " << step;
-          }
-        }
-      });
-    }
-  }
-
-  VLOG(1) << "Replicated execution started";
-  TF_ASSIGN_OR_RETURN(
-      std::vector<ScopedShapedBuffer> results,
-      execution_helper(service_run_options, argument_buffer_slices));
-  VLOG(1) << "Replicated execution terminated";
-
-  std::vector<Literal> exec_results;
-  exec_results.reserve(options.num_replicas);
-  for (int64_t i = 0; i < options.num_replicas; ++i) {
-    TF_RETURN_IF_ERROR(streams[i]->BlockHostUntilDone());
-    TF_ASSIGN_OR_RETURN(Literal literal,
-                        backend().transfer_manager()->TransferLiteralFromDevice(
-                            streams[i].get(), results[i]));
-    exec_results.push_back(std::move(literal));
-  }
-  return std::move(exec_results);
+  return absl::UnimplementedError(
+      "HloRunner::ExecuteReplicatedImpl is not implemented. "
+      "Please use the HloRunner::ExecuteReplicated method instead.");
 }
 
 absl::StatusOr<std::vector<Literal>> HloRunner::ExecuteReplicated(
     OpaqueExecutable* executable, const ReplicatedExecuteOptions& options,
     DeviceAssignment* device_assignment, ExecutionProfile* profile) {
-  TF_ASSIGN_OR_RETURN(HloRunnerExecutable* const wrapped_executable,
-                      HloRunnerExecutable::TryUnwrap(*this, executable));
-  return ExecuteReplicatedImpl(
-      [&, executable = wrapped_executable->executable()](
-          const std::vector<ServiceExecutableRunOptions>& service_run_options,
-          const std::vector<absl::Span<const ShapedBuffer* const>>&
-              argument_buffer_slices)
-          -> absl::StatusOr<std::vector<ScopedShapedBuffer>> {
-        std::vector<ScopedShapedBuffer> results;
-        if (!options.use_threads) {
-          TF_ASSIGN_OR_RETURN(
-              results, executable->ExecuteOnStreams(service_run_options,
-                                                    argument_buffer_slices));
-        } else {
-          absl::Mutex mutex;
-          std::vector<absl::StatusOr<ScopedShapedBuffer>> thread_results(
-              options.num_replicas);
-          {
-            VLOG(1) << "Creating thread pool for " << options.num_replicas
-                    << " replicas";
-            tsl::thread::ThreadPool pool(tsl::Env::Default(), "replicas",
-                                         options.num_replicas);
-            for (int64_t i = 0; i < options.num_replicas; ++i) {
-              pool.Schedule([&, i] {
-                auto result = executable->ExecuteOnStream(
-                    &service_run_options[i], argument_buffer_slices[i]);
-                absl::MutexLock lock(&mutex);
-                thread_results[i] = std::move(result);
-              });
-            }
-
-            // Note: the thread pool destructor guarantees it completes all
-            // work before we leave this scope.
-          }
-          for (auto& thread_result : thread_results) {
-            if (!thread_result.ok()) {
-              return thread_result.status();
-            }
-            results.push_back(std::move(thread_result).value());
-          }
-        }
-        return results;
-      },
-      [&](int64_t replica) { return options.arguments.size(); },
-      [&](int64_t replica, int64_t index) { return options.arguments[index]; },
-      options, device_assignment);
+  return absl::UnimplementedError(
+      "HloRunner::ExecuteReplicatedImpl is not implemented. "
+      "Please use the HloRunner::ExecuteReplicated method instead.");
 }
 
 absl::StatusOr<std::vector<Literal>> HloRunner::ExecuteReplicated(
@@ -657,56 +629,9 @@ absl::StatusOr<std::vector<Literal>> HloRunner::ExecuteReplicated(
     std::function<const Literal*(int64_t, int64_t)> argument_provider,
     const ReplicatedExecuteOptions& options,
     DeviceAssignment* device_assignment) {
-  DeviceAssignment computation_device_assignment;
-  if (device_assignment == nullptr) {
-    TF_ASSIGN_OR_RETURN(
-        computation_device_assignment,
-        backend().computation_placer()->AssignDevices(options.num_replicas, 1));
-    device_assignment = &computation_device_assignment;
-  }
-  CHECK_NE(device_assignment, nullptr);
-  return ExecuteReplicatedImpl(
-      [&](const std::vector<ServiceExecutableRunOptions>& service_run_options,
-          const std::vector<absl::Span<const ShapedBuffer* const>>&
-              argument_buffer_slices)
-          -> absl::StatusOr<std::vector<ScopedShapedBuffer>> {
-        TF_RET_CHECK(options.use_threads);
-        std::vector<ScopedShapedBuffer> results;
-        absl::Mutex mutex;
-        std::vector<absl::StatusOr<ScopedShapedBuffer>> thread_results(
-            options.num_replicas);
-        {
-          VLOG(1) << "Creating thread pool for " << options.num_replicas
-                  << " replicas";
-          tsl::thread::ThreadPool pool(tsl::Env::Default(), "replicas",
-                                       options.num_replicas);
-          for (int64_t i = 0; i < options.num_replicas; ++i) {
-            for (const auto& arg : argument_buffer_slices[i]) {
-              TF_RET_CHECK(arg != nullptr);
-            }
-            TF_ASSIGN_OR_RETURN(
-                HloRunnerExecutable* const executable,
-                HloRunnerExecutable::TryUnwrap(*this, executable_provider(i)));
-            pool.Schedule([&, i, executable] {
-              auto result = executable->executable()->ExecuteOnStream(
-                  &service_run_options[i], argument_buffer_slices[i]);
-              absl::MutexLock lock(&mutex);
-              thread_results[i] = std::move(result);
-            });
-          }
-
-          // Note: the thread pool destructor guarantees it completes all work
-          // before we leave this scope.
-        }
-        for (auto& thread_result : thread_results) {
-          if (!thread_result.ok()) {
-            return thread_result.status();
-          }
-          results.push_back(std::move(thread_result).value());
-        }
-        return results;
-      },
-      argument_count_provider, argument_provider, options, device_assignment);
+  return absl::UnimplementedError(
+      "HloRunner::ExecuteReplicatedImpl is not implemented. "
+      "Please use the HloRunner::ExecuteReplicated method instead.");
 }
 
 absl::StatusOr<std::vector<Literal>> HloRunner::ExecuteReplicated(
@@ -768,6 +693,7 @@ HloRunner::DeserializeExecutable(const absl::string_view serialized) const {
 ServiceExecutableRunOptions HloRunner::GetServiceRunOptionsForDevice(
     int64_t device, se::Stream* stream, DeviceAssignment* device_assignment,
     RunId run_id, int local_device_count) {
+  VLOG(2) << "Creating ServiceExecutableRunOptions for device " << device;
   ExecutableRunOptions run_options;
   run_options.set_device_ordinal(device);
   run_options.set_local_device_count(local_device_count);
@@ -846,6 +772,7 @@ absl::StatusOr<const HloProto* absl_nonnull> HloRunner::HloProtoFromWrapped(
 void HloRunner::MaybeUpdateEntryComputationLayout(HloModule* module) {
   absl::MutexLock lock(&mu_);
   if (module_ids_with_updated_layouts_.insert(module->unique_id()).second) {
+    VLOG(2) << "Updating entry computation layout";
     xla::UpdateEntryComputationLayout(module, device_shape_representation_fn_);
   }
 }

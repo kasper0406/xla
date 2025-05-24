@@ -94,6 +94,8 @@ struct Backend::IntraOpThreadPool {
   TF_ASSIGN_OR_RETURN(
       auto stream_executors,
       PlatformUtil::GetStreamExecutors(platform, options.allowed_devices()));
+  VLOG(2) << "Created backend with " << stream_executors.size()
+          << " stream executors.";
   TF_ASSIGN_OR_RETURN(auto transfer_manager,
                       TransferManager::GetForPlatform(platform));
   TF_ASSIGN_OR_RETURN(auto computation_placer,
