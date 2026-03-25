@@ -254,7 +254,7 @@ static absl::StatusOr<ncclConfig_t> AsNcclConfig(
     comm_config.maxCTAs = config.max_nchannels;
   } else if (stream_executor->GetDeviceDescription()
                  .cuda_compute_capability()
-                 .IsBlackwell() &&
+                 .IsAtLeastBlackwell() &&
              nccl_version >= NCCL_VERSION(2, 28, 0)) {
     // Future NCCL versions will reduce the default max number of channels on
     // Blackwell to 16. We need to manually set it to 32 here to avoid surprise

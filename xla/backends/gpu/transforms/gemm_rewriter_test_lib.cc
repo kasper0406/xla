@@ -47,6 +47,13 @@ bool GemmRewriteTestBase::IsBlackwell() const {
   return false;
 }
 
+bool GemmRewriteTestBase::IsAtLeastBlackwell() const {
+  if (IsCuda()) {
+    return Capability().cuda_compute_capability()->IsAtLeastBlackwell();
+  }
+  return false;
+}
+
 stream_executor::GpuComputeCapability
 GemmRewriteTestBase::CudaHopperOrRocmCapability() {
   if (IsCuda()) {

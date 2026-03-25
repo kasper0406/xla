@@ -1,0 +1,26 @@
+// RUN: hlo-opt %s --platform=gpu --stage=hlo --xla_gpu_target_config_filename=%S/../../../backends/gpu/target_config/specs/rtx6000pro.txtpb | FileCheck %s
+
+// On consumer sm_120: FP8 convolutions with channels_per_group >= 16 should
+// remain on the FP8 graph conv path. Verify for both f8e4m3fn and f8e5m2.
+
+// Both convolutions should use the FP8 graph path (not widened to BF16):
+// CHECK: custom_call_target="__cudnn$convForwardGraph"
+// CHECK: custom_call_target="__cudnn$convForwardGraph"
+
+HloModule F8ConvBoundaryChannelsPerGroup16
+
+ENTRY main {
+  // Grouped conv: C=64, groups=4, C/groups=16 — at the boundary, stays FP8.
+  input_e4m3 = f8e4m3fn[1,16,16,64]{3,2,1,0} parameter(0)
+  filter_e4m3 = f8e4m3fn[3,3,16,64]{3,2,1,0} parameter(1)
+  conv_e4m3 = f8e4m3fn[1,16,16,64]{3,2,1,0} convolution(input_e4m3, filter_e4m3),
+    window={size=3x3 pad=1_1x1_1}, dim_labels=b01f_01io->b01f, feature_group_count=4
+
+  // Same with f8e5m2: C=64, groups=4, C/groups=16 — stays FP8.
+  input_e5m2 = f8e5m2[1,16,16,64]{3,2,1,0} parameter(2)
+  filter_e5m2 = f8e5m2[3,3,16,64]{3,2,1,0} parameter(3)
+  conv_e5m2 = f8e5m2[1,16,16,64]{3,2,1,0} convolution(input_e5m2, filter_e5m2),
+    window={size=3x3 pad=1_1x1_1}, dim_labels=b01f_01io->b01f, feature_group_count=4
+
+  ROOT tuple = (f8e4m3fn[1,16,16,64]{3,2,1,0}, f8e5m2[1,16,16,64]{3,2,1,0}) tuple(conv_e4m3, conv_e5m2)
+}

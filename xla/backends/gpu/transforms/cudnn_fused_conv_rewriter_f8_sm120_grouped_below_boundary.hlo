@@ -1,0 +1,35 @@
+// RUN: hlo-opt %s --platform=gpu --stage=hlo --xla_gpu_target_config_filename=%S/../../../backends/gpu/target_config/specs/rtx6000pro.txtpb | FileCheck %s
+
+// On consumer sm_120: grouped (non-depthwise) FP8 convolutions with
+// channels_per_group < 16 should not use FP8 graph conv and should be widened
+// to BF16.
+
+// Neither grouped conv should use the FP8 graph path:
+// CHECK-NOT: __cudnn$convForwardGraph
+
+// Both should be widened to bf16 and use the unfused conv path.
+// f8e4m3fn grouped conv (C/groups=8) -> bf16 conv:
+// CHECK: = (bf16[
+// CHECK-SAME: custom_call_target="__cudnn$convForward"
+
+// f8e5m2 grouped conv (C/groups=8) -> bf16 conv:
+// CHECK: = (bf16[
+// CHECK-SAME: custom_call_target="__cudnn$convForward"
+
+HloModule F8GroupedConvBelowBoundaryWidenedToBf16OnSm120
+
+ENTRY main {
+  // Grouped (non-depthwise): C=64, groups=8, C/groups=8 (<16) -> widened.
+  input_e4m3 = f8e4m3fn[1,8,8,64]{3,2,1,0} parameter(0)
+  filter_e4m3 = f8e4m3fn[3,3,8,64]{3,2,1,0} parameter(1)
+  conv_e4m3 = f8e4m3fn[1,8,8,64]{3,2,1,0} convolution(input_e4m3, filter_e4m3),
+    window={size=3x3 pad=1_1x1_1}, dim_labels=b01f_01io->b01f, feature_group_count=8
+
+  // Same shape with f8e5m2.
+  input_e5m2 = f8e5m2[1,8,8,64]{3,2,1,0} parameter(2)
+  filter_e5m2 = f8e5m2[3,3,8,64]{3,2,1,0} parameter(3)
+  conv_e5m2 = f8e5m2[1,8,8,64]{3,2,1,0} convolution(input_e5m2, filter_e5m2),
+    window={size=3x3 pad=1_1x1_1}, dim_labels=b01f_01io->b01f, feature_group_count=8
+
+  ROOT tuple = (f8e4m3fn[1,8,8,64]{3,2,1,0}, f8e5m2[1,8,8,64]{3,2,1,0}) tuple(conv_e4m3, conv_e5m2)
+}

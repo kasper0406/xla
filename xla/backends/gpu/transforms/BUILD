@@ -1922,9 +1922,14 @@ lit_test_suite(
     name = "hlo_lit_tests",
     srcs = enforce_glob(
         [
-            "layout_assignment_v100.hlo",
+            "cudnn_fused_conv_rewriter_f8_b200_no_widening.hlo",
+            "cudnn_fused_conv_rewriter_f8_sm120_grouped_below_boundary.hlo",
+            "cudnn_fused_conv_rewriter_f8_sm120_boundary.hlo",
+            "cudnn_fused_conv_rewriter_no_f8_graph_conv_blackwell.hlo",
             "layout_assignment_a100.hlo",
             "layout_assignment_h100.hlo",
+            "layout_assignment_rtx6000pro.hlo",
+            "layout_assignment_v100.hlo",
         ],
         include = [
             "*.hlo",

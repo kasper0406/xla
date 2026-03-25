@@ -1442,11 +1442,11 @@ class GemmRewriterVisitor : public DfsHloRewriteVisitor {
     DotDimensionNumbers* dim_nums =
         gemm_backend_config.mutable_dot_dimension_numbers();
 
-    // On non-Blackwell systems, cuBLASLt FP8 GEMM kernels require the first
+    // On pre-Blackwell systems, cuBLASLt FP8 GEMM kernels require the first
     // operand, i.e. A, to be row-major. If A is column-major, swap the
     // contracting and non-contracting dimension and transpose the matrix to
     // effectively make it column-major.
-    if (!cuda_compute_capability.IsBlackwell()) {
+    if (!cuda_compute_capability.IsAtLeastBlackwell()) {
       if (gemm_config.lhs_layout.order == MatrixLayout::Order::kColumnMajor) {
         CHECK(a_contracting_dims[0] == num_batch_dims ||
               a_contracting_dims[0] == num_batch_dims + 1);
@@ -1460,7 +1460,7 @@ class GemmRewriterVisitor : public DfsHloRewriteVisitor {
       }
 
       // Similarly, cuBLASLt requires the second operand to be column-major on
-      // non-Blackwell systems, so make it column-major if it is currently
+      // pre-Blackwell systems, so make it column-major if it is currently
       // row-major.
       if (gemm_config.rhs_layout.order == MatrixLayout::Order::kRowMajor) {
         CHECK(b_contracting_dims[0] == num_batch_dims ||

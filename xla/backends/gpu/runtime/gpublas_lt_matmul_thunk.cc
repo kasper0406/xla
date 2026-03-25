@@ -207,6 +207,13 @@ CublasLtMatmulThunk::GetCachedMatmulPlan(const ExecuteParams& params) {
         auto algorithms,
         plan->GetAlgorithms(params.stream, num_algorithms, max_workspace));
 
+    if (algorithms.empty()) {
+      return absl::InternalError(
+          "Failed to get a MatmulPlan: no valid algorithm found.");
+    }
+    TF_RET_CHECK(algorithm_idx_ < algorithms.size())
+        << "Algorithm index " << algorithm_idx_ << " is out of range; only "
+        << algorithms.size() << " algorithms available.";
     TF_RETURN_IF_ERROR(plan->SetAlgorithm(algorithms[algorithm_idx_]));
     return std::move(plan);
   };

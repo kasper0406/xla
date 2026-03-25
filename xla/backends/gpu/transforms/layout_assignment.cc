@@ -444,7 +444,7 @@ absl::Status GpuLayoutAssignment::AddDotBackendConstraints(
 
   const se::CudaComputeCapability* cc = gpu_version_.cuda_compute_capability();
   const bool both_operands_require_minor_contraction_dims =
-      is_s8_to_s32 || (is_fp8 && !(cc && cc->IsBlackwell()));
+      is_s8_to_s32 || (is_fp8 && !(cc && cc->IsAtLeastBlackwell()));
 
   for (const Side& side : {lhs, rhs}) {
     if ((IsPackedInstruction(side.operand) && pack_along_contracting_dims) ||

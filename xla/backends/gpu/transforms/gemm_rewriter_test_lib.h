@@ -40,6 +40,8 @@ class GemmRewriteTestBase : public HloPjRtGpuTestBase {
 
   bool IsBlackwell() const;
 
+  bool IsAtLeastBlackwell() const;
+
   stream_executor::GpuComputeCapability CudaHopperOrRocmCapability();
 
   DebugOptions GetDebugOptionsForTest() const override;

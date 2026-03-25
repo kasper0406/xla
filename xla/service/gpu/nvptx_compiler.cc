@@ -109,6 +109,10 @@ namespace xla {
 namespace gpu {
 namespace {
 
+bool IsConsumerSm120(const se::CudaComputeCapability& cc) {
+  return cc.major == 12 && cc.minor == 0;
+}
+
 class ConvBfloat16Support : public FloatSupport {
  public:
   explicit ConvBfloat16Support(
@@ -120,11 +124,11 @@ class ConvBfloat16Support : public FloatSupport {
 
   bool SupportsLowPrecisionOperand(const HloInstruction& hlo,
                                    int64_t operand_index) const override {
-    return (hlo.opcode() != HloOpcode::kConvolution) || is_conv_bf16_supported_;
+    return SupportsLowPrecision(hlo);
   }
 
   bool SupportsLowPrecisionOutput(const HloInstruction& hlo) const override {
-    return (hlo.opcode() != HloOpcode::kConvolution) || is_conv_bf16_supported_;
+    return SupportsLowPrecision(hlo);
   }
 
   bool SupportsMixedPrecisions(const HloInstruction& hlo) const override {
@@ -133,7 +137,80 @@ class ConvBfloat16Support : public FloatSupport {
   }
 
  private:
+  bool SupportsLowPrecision(const HloInstruction& hlo) const {
+    return (hlo.opcode() != HloOpcode::kConvolution) || is_conv_bf16_supported_;
+  }
+
   bool is_conv_bf16_supported_;
+};
+
+// Widens FP8 convolutions to BF16 on consumer sm_120 GPUs when cuDNN
+// lacks support.
+//
+// cuDNN 9.x has limited FP8 convolution support on sm_120: grouped and
+// depthwise convolutions with channels_per_group < 16 return zero or degraded
+// execution plans. Regular convolutions (groups=1) and mildly-grouped
+// convolutions (C/groups >= 16) work fine.
+//
+// This class preserves FP8 for convolutions where C/groups >= 16, and widens
+// to BF16 only where cuDNN cannot handle them. FP8 matmuls are unaffected.
+//
+class ConvFp8Support : public FloatSupport {
+ public:
+  explicit ConvFp8Support(
+      PrimitiveType fp8_type,
+      const se::CudaComputeCapability& cuda_compute_capability)
+      : FloatSupport(fp8_type, BF16),
+        is_consumer_sm120_(IsConsumerSm120(cuda_compute_capability)) {}
+
+  bool SupportsLowPrecisionOperand(const HloInstruction& hlo,
+                                   int64_t operand_index) const override {
+    return SupportsLowPrecision(hlo);
+  }
+
+  bool SupportsLowPrecisionOutput(const HloInstruction& hlo) const override {
+    return SupportsLowPrecision(hlo);
+  }
+
+  bool SupportsMixedPrecisions(const HloInstruction& hlo) const override {
+    return (hlo.opcode() != HloOpcode::kConvolution);
+  }
+
+  bool SawUnsupportedConvolution() const {
+    return saw_unsupported_convolution_;
+  }
+
+ private:
+  bool SupportsLowPrecision(const HloInstruction& hlo) const {
+    if (hlo.opcode() != HloOpcode::kConvolution || !is_consumer_sm120_) {
+      return true;
+    }
+    if (HasSufficientChannelsPerGroup(hlo)) {
+      return true;
+    }
+    saw_unsupported_convolution_ = true;
+    return false;
+  }
+
+  // cuDNN FP8 conv engines on sm_120 require channels_per_group >= 16.
+  // Below that threshold, plans are either absent (0) or degraded (1 slow
+  // Fallback plan). Widen to BF16 for safety.
+  static constexpr int64_t kMinChannelsPerGroup = 16;
+
+  bool HasSufficientChannelsPerGroup(const HloInstruction& hlo) const {
+    int64_t feature_group_count = hlo.feature_group_count();
+    if (feature_group_count <= 1) {
+      return true;  // Regular conv (groups=1): FP8 fully supported.
+    }
+    const auto& dnums = hlo.convolution_dimension_numbers();
+    int64_t input_features =
+        hlo.operand(0)->shape().dimensions(dnums.input_feature_dimension());
+    int64_t channels_per_group = input_features / feature_group_count;
+    return channels_per_group >= kMinChannelsPerGroup;
+  }
+
+  bool is_consumer_sm120_;
+  mutable bool saw_unsupported_convolution_ = false;
 };
 
 class MatmulBfloat16Support : public FloatSupport {
@@ -146,11 +223,11 @@ class MatmulBfloat16Support : public FloatSupport {
 
   bool SupportsLowPrecisionOperand(const HloInstruction& hlo,
                                    int64_t operand_index) const override {
-    return (hlo.opcode() != HloOpcode::kDot) || is_matmul_bf16_supported_;
+    return SupportsLowPrecision(hlo);
   }
 
   bool SupportsLowPrecisionOutput(const HloInstruction& hlo) const override {
-    return (hlo.opcode() != HloOpcode::kDot) || is_matmul_bf16_supported_;
+    return SupportsLowPrecision(hlo);
   }
 
   bool SupportsMixedPrecisions(const HloInstruction& hlo) const override {
@@ -158,6 +235,10 @@ class MatmulBfloat16Support : public FloatSupport {
   }
 
  private:
+  bool SupportsLowPrecision(const HloInstruction& hlo) const {
+    return (hlo.opcode() != HloOpcode::kDot) || is_matmul_bf16_supported_;
+  }
+
   bool is_matmul_bf16_supported_;
 };
 
@@ -175,6 +256,16 @@ absl::Status NVPTXCompiler::OptimizeHloConvolutionCanonicalization(
   pipeline.AddInvariantCheckerDebug<HloVerifier>(
       /*layout_sensitive=*/false,
       /*allow_mixed_precision=*/false);
+
+  // Widen unsupported FP8 convolutions to BF16 on consumer sm_120. cuDNN's FP8
+  // conv engines on sm_120 require channels_per_group >= 16; grouped and
+  // depthwise convolutions below that threshold are widened to BF16.
+  // Must run before the BF16 normalization passes below.
+  const bool is_consumer_sm120 = IsConsumerSm120(*cuda_compute_capability);
+  ConvFp8Support conv_fp8_e4m3_support(F8E4M3FN, *cuda_compute_capability);
+  pipeline.AddPass<FloatNormalization>(&conv_fp8_e4m3_support);
+  ConvFp8Support conv_fp8_e5m2_support(F8E5M2, *cuda_compute_capability);
+  pipeline.AddPass<FloatNormalization>(&conv_fp8_e5m2_support);
 
   // Convert unsupported bf16 convolutions to f32.
   ConvBfloat16Support conv_bf16_support(dnn_version, *cuda_compute_capability);
@@ -254,6 +345,15 @@ absl::Status NVPTXCompiler::OptimizeHloConvolutionCanonicalization(
   TF_RETURN_IF_ERROR(
       pipeline.Run(hlo_module, {HloInstruction::kMainExecutionThread})
           .status());
+
+  if (is_consumer_sm120 &&
+      (conv_fp8_e4m3_support.SawUnsupportedConvolution() ||
+       conv_fp8_e5m2_support.SawUnsupportedConvolution())) {
+    LOG(WARNING)
+        << "Widened FP8 convolutions with channels_per_group < 16 to BF16 on "
+           "consumer sm_120 due to cuDNN limitations. FP8 matmuls and "
+           "convolutions with channels_per_group >= 16 are unaffected.";
+  }
 
   return absl::OkStatus();
 }

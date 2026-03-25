@@ -5434,8 +5434,13 @@ absl::Status CreateOpRunners(
     // We currently collect a list of algorithms using heuristics_mode_a and
     // heuristics_mode_b, so we can potentially have duplicates. But we should
     // not actually autotune the same algorithm twice!
-    if (!algorithm_deduplication.insert(runner_or->ToAlgorithmDesc().value())
-             .second) {
+    auto algo_desc_or = runner_or->ToAlgorithmDesc();
+    if (!algo_desc_or.ok()) {
+      VLOG(4) << "Failed to get algorithm desc from runner: "
+              << algo_desc_or.status();
+      continue;
+    }
+    if (!algorithm_deduplication.insert(algo_desc_or.value()).second) {
       continue;
     }
 

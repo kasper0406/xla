@@ -152,14 +152,14 @@ int64_t MaxUnrollFactor(const HloFusionAnalysis* analysis) {
   // On PTX level, we can efficiently vectorize up to 128/256 bits (v4/v8.b32).
   // So we allow aggressive unrolling for narrow types to reach this width.
   const int64_t max_vector_bit_width =
-      (analysis->device_info().cuda_compute_capability().IsBlackwell() &&
+      (analysis->device_info().cuda_compute_capability().IsAtLeastBlackwell() &&
        analysis->device_info().compile_time_toolkit_version() >=
            stream_executor::SemanticVersion(12, 9, 0))
           ? 256
           : 128;
   const int max_bits_for_aggressive_unrolling =
       max_vector_bit_width / kDefaultUnrollFactor;
-  if (analysis->device_info().cuda_compute_capability().IsBlackwell() &&
+  if (analysis->device_info().cuda_compute_capability().IsAtLeastBlackwell() &&
       (analysis->emitter_fusion_kind() ==
            HloFusionAnalysis::EmitterFusionKind::kLoop ||
        analysis->emitter_fusion_kind() ==
@@ -167,11 +167,9 @@ int64_t MaxUnrollFactor(const HloFusionAnalysis* analysis) {
       analysis->input_output_info().smallest_output_dtype_bits <
           max_bits_for_aggressive_unrolling &&
       analysis->fusion_root_count() <= kMaxNumOutputsForFullUnrolling &&
-      !HloAnyOf(
-          analysis->fusion(),
-          [](HloInstructionAdaptor node) {
-            return node.opcode() == HloOpcode::kReduce;
-          })) {
+      !HloAnyOf(analysis->fusion(), [](HloInstructionAdaptor node) {
+        return node.opcode() == HloOpcode::kReduce;
+      })) {
     // Do not unroll sub-byte types further for now.
     int64_t max_dtype_bits = 8;
     for (const HloInstruction* param : analysis->fusion().GetParameters()) {

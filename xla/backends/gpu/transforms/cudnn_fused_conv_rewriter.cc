@@ -70,6 +70,27 @@ namespace {
 
 namespace m = match;
 
+bool IsConsumerSm120(const se::CudaComputeCapability& cc) {
+  // Note: This also include RTX6000Pro (sm_120)
+  return cc.major == 12 && cc.minor == 0;
+}
+
+// cuDNN FP8 conv engines on consumer sm_120 require channels_per_group >= 16.
+// Grouped/depthwise convolutions below that threshold are unsupported.
+bool HasSufficientChannelsPerGroupForSm120Fp8Conv(
+    const HloInstruction& convolution) {
+  int64_t feature_group_count = convolution.feature_group_count();
+  if (feature_group_count <= 1) {
+    return true;
+  }
+  int64_t input_feature_dim =
+      convolution.convolution_dimension_numbers().input_feature_dimension();
+  int64_t input_features =
+      convolution.operand(0)->shape().dimensions(input_feature_dim);
+  int64_t channels_per_group = input_features / feature_group_count;
+  return channels_per_group >= 16;
+}
+
 bool IsConvCustomCall(const HloInstruction* instr) {
   return HloPredicateIsOp<HloOpcode::kCustomCall>(instr) &&
          (instr->custom_call_target() == kCudnnConvForwardCallTarget ||
@@ -894,6 +915,15 @@ absl::StatusOr<bool> F8GraphConv(HloComputation* comp,
             .WithPredicate(IsConvCustomCall),
         0);
     if (Match(instr, pattern)) {
+      // On consumer sm_120, skip FP8 graph conv for convolutions where cuDNN
+      // lacks support (channels_per_group < 16). These should already be
+      // widened to BF16 by FloatNormalization, but check here as
+      // defense-in-depth.
+      if (IsConsumerSm120(cc) &&
+          !HasSufficientChannelsPerGroupForSm120Fp8Conv(*convolution)) {
+        continue;
+      }
+
       if (!ConsumeFuel("cudnn-fused-convolution-rewriter", [&] {
             return absl::StrCat("F8GraphConv: ", convolution->ToString());
           })) {

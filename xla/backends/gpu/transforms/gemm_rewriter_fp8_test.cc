@@ -3030,8 +3030,8 @@ TEST_P(ParameterizedFp8GemmRewriteTest, FnuzTypeF8) {
 }
 
 TEST_P(ParameterizedFp8GemmRewriteTest, NoTransposeOnBlackwellF8) {
-  if (!IsBlackwell()) {
-    GTEST_SKIP() << "Test requires a Blackwell GPU.";
+  if (!IsAtLeastBlackwell()) {
+    GTEST_SKIP() << "Test requires a Blackwell-family GPU (sm_100+).";
   }
   const char* hlo_text = R"(
     HloModule test
